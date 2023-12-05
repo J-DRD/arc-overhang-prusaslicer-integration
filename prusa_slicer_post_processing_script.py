@@ -2,26 +2,38 @@
 This script generates Overhangs by stringing together Arcs, allowing successful fdm-3d-printing of large 90 deg overhangs!
 The genius Idea is emerged from Steven McCulloch, who coded a demonstration and the basic mechanics: https://github.com/stmcculloch/arc-overhang
 This python script builds up on that and offers a convinient way to integrate the ArcOverhangs into an existing gcode-file.
+
 HOW TO USE: 
 Option A) open your system console and type 'python ' followed by the path to this script and the path of the gcode file. Will overwrite the file.
 Option B) open PrusaSlicer, go to print-settings-tab->output-options. Locate the window for post-processing-script. 
     In that window enter: full path to your python exe,emtyspace, full path to this script.
     If the python path contains any empty spaces, mask them as described here: https://manual.slic3r.org/advanced/post-processing
 =>PrusaSlicer will execute the script after the export of the Gcode, therefore the view in the window wont change. Open the finished gcode file to see the results.
+
 If you want to change generation settings: Scroll to 'Parameter' section. Settings from PrusaSlicer will be extracted automaticly from the gcode.
+
 Requirements:
-Python 3.5+ and the librarys: shapely 1.8+, numpy 1.2+, numpy-hilbert-curve matplotlib for debugging
-Slicing in PrusaSlicer is mandatory.
-Tested only in PrusaSlicer 2.5&Python 3.10, other versions might need adapted keywords.
+Python 3.5+ and the librarys: shapely 1.8+, numpy 1.2+, matplotlib for debugging
+
+Limitations:
+-As with your 3d-printer you may need to customize some settings to your specific geometry. The script will inform you how, when Errors occur :)
+-Currently deletes all BridgeInfills in layers with arcs...
+-while the arcs print fairly straight, the layers above will induce warping.
+-The Arcs are extruded very thick, so the layer will be 0.1-0.5mm thicker (dependend on nozzle dia) than expected=>if precision needed make test prints to counter this effect.
+
 Notes:
 This code is a little messy. Usually I would devide it into multiple files, but that would compromise the ease of use.
 Therefore I divided the code into sections, marked with ###
 Feel free to give it some refactoring and add more functionalities!
-Used Coding-Flavour: variable Names: smallStartEveryWordCapitalized, 'to' replaced by '2', same for "for"->"4". Parameters: BigStartEveryWordCapitalized
+
+Future possible extensions:
+-slow down all commands 5mm above arcs, to prevent warping, slow down the bridging-speed of the perimeter, if necessary
+
+
 Known issues:
--pointsPerCircle>80 might give weird results
--MaxDistanceFromPerimeter >=2*perimeterwidth might weird result.
--avoid using the code multiple times onto the same gcode, since the bridge infill is deleted when the arcs are generated.
+-pointsPerCircle>80 give weird results
+-MaxDistanceFromPerimeter >=2*perimeterwidth=weird result.
+-avoid using the code multiple times onto the same gcode, as errors might accumulate.
 """
 #!/usr/bin/python
 import sys
@@ -34,64 +46,44 @@ import numpy as np
 from ast import literal_eval
 import warnings
 import random
-import platform
-#from hilbertcurve.hilbertcurve import HilbertCurve
-from hilbert import decode, encode
+
 ########## Parameters  - adjust values here as needed ##########
 def makeFullSettingDict(gCodeSettingDict:dict) -> dict: 
     """Merge Two Dictionarys and set some keys/values explicitly"""
     #the slicer-settings will be imported from GCode. But some are Arc-specific and need to be adapted by you.
     AddManualSettingsDict={
         #adapt these settings as needed for your specific geometry/printer:
-        "CheckForAllowedSpace":False,# use the following x&y filter or not
         "AllowedSpaceForArcs": Polygon([[0,0],[500,0],[500,500],[0,500]]),#have control in which areas Arcs shall be generated
         "ArcCenterOffset":2, # Unit:mm, prevents very small Arcs by hiding the center in not printed section. Make 0 to get into tricky spots with smaller arcs.
         "ArcMinPrintSpeed":0.5*60,#Unit:mm/min
         "ArcPrintSpeed":1.5*60, #Unit:mm/min
-        #"ArcPrintTemp":gCodeSettingDict.get("temperature"), # unit: Celsius
         "ArcTravelFeedRate":30*60, # slower travel speed, Unit:mm/min
-        "ExtendIntoPerimeter":1.5*gCodeSettingDict.get("perimeter_extrusion_width"), #min=0.5extrusionwidth!, extends the Area for arc generation, put higher to go through small passages. Unit:mm
-        "MaxDistanceFromPerimeter":2*gCodeSettingDict.get("perimeter_extrusion_width"),#Control how much bumpiness you allow between arcs and perimeter. lower will follow perimeter better, but create a lot of very small arcs. Should be more that 1 Arcwidth! Unit:mm
+        "ExtendIntoPerimeter":2*gCodeSettingDict.get("sparse_infill_line_width"), #min=0.5extrusionwidth!, extends the Area for arc generation, put higher to go through small passages. Unit:mm
+        "MaxDistanceFromPerimeter":2*gCodeSettingDict.get("sparse_infill_line_width"),#Control how much bumpiness you allow between arcs and perimeter. lower will follow perimeter better, but create a lot of very small arcs. Should be more that 1 Arcwidth! Unit:mm
         "MinArea":5*10,#Unit:mm2
         "MinBridgeLength":5,#Unit:mm
-        "Path2Output":r"", #leave empty to overwrite the file or write to a new file. Full path required.
-        "RMax":110, # the max radius of the arcs.
-        "TimeLapseEveryNArcs": 0, #deactivate with 0, inserts M240 after N ArcLines, 5 is a good value to start.
-
-        #Special cooling to prevent warping:
-        "aboveArcsFanSpeed":25, #0->255, 255=100%
-        "aboveArcsInfillPrintSpeed":10*60, # Unit :mm/min
-        "aboveArcsPerimeterFanSpeed":25, #0->255, 255=100%
-        "aboveArcsPerimeterPrintSpeed":3*60, #Unit: mm/min
-        "applyAboveFanSpeedToWholeLayer":True,
-        "CoolingSettingDetectionDistance":5, #if the gcode line is closer than this distance to an infill polygon the cooling settings will be applied. Unit:mm
-        "specialCoolingZdist":3, #use the special cooling XX mm above the arcs.
+        "RMax":100, # the max radius of the arcs.
 
         #advanced Settings, you should not need to touch these.
         "ArcExtrusionMultiplier":1.35,
         "ArcSlowDownBelowThisDuration":3,# Arc Time below this Duration =>slow down, Unit: sec
-        "ArcWidth":gCodeSettingDict.get("nozzle_diameter")*0.95, #change the spacing between the arcs,should be nozzle_diameter
-        "ArcFanSpeed":255,#cooling to full blast=255
+        #"ArcWidth":gCodeSettingDict.get("nozzle_diameter")*0.95, #change the spacing between the arcs,should be nozzle_diameter
+        "ArcWidth":0.4*0.95, #change the spacing between the arcs,should be nozzle_diameter
         "CornerImportanceMultiplier":0.2, # Startpoint for Arc generation is chosen close to the middle of the StartLineString and at a corner. Higher=>Cornerselection more important.
         "DistanceBetweenPointsOnStartLine":0.1,#used for redestribution, if start fails.
         "GCodeArcPtMinDist":0.1, # min Distance between points on the Arcs to for seperate GCode Command. Unit:mm
         "ExtendArcDist":1.0, # extend Arcs tangentially for better bonding bewteen them, only end-piece affected(yet), Unit:mm
-        "HilbertFillingPercentage":100, # infillpercentage of the massive layers with special cooling. Uses Hilbert Curve, works not quite right yet.
-        "HilbertInfillExtrusionMultiplier":1.05, 
-        "HilbertTravelEveryNSeconds":6, # when N seconds are driven it will continue printing somewhere else (very rough approx).
         "MinStartArcs":2, # how many arcs shall be generated in first step
         "PointsPerCircle":80, # each Arc starts as a discretized circle. Higher will slow down the code but give more accurate results for the arc-endings. 
         "SafetyBreak_MaxArcNumber":2000, #max Number of Arc Start Points. prevents While loop form running for ever.
         "WarnBelowThisFillingPercentage":90, # fill the overhang at least XX%, else send a warning. Easier detection of errors in small/delicate areas. Unit:Percent
-        "UseLeastAmountOfCenterPoints":True, # always generates arcs until rMax is reached, divide the arcs into pieces in needed. reduces the amount of centerpoints.
+        "UseLeastAmountOfCenterPoints":False, # always generates arcs until rMax is reached, divide the arcs into pieces in needed. reduces the amount of centerpoints.
     
         #settings for easier debugging:
         "plotStart":False, # plot the detected geoemtry in the prev Layer and the StartLine for Arc-Generation, use for debugging
         "plotArcsEachStep":False, #plot arcs for every filled polygon. use for debugging
         "plotArcsFinal":False, #plot arcs for every filled polygon, when completely filled. use for debugging
-        "plotDetectedInfillPoly":False, # plot each detected overhang polygon, use for debugging.
-        "plotEachHilbert":False,
-        "PrintDebugVerification":False
+        "plotDetectedInfillPoly":False # plot each detected overhang polygon, use for debugging.
         }
     gCodeSettingDict.update(AddManualSettingsDict)
     return gCodeSettingDict
@@ -99,54 +91,34 @@ def makeFullSettingDict(gCodeSettingDict:dict) -> dict:
 ################################# MAIN FUNCTION #################################
 #################################################################################    
 #at the top, for better reading
-def main(gCodeFileStream,path2GCode,skipInput)->None:
+def main(gCodeFileStream,path2GCode)->None:
     '''Here all the work is done, therefore it is much to long.'''
     gCodeLines=gCodeFileStream.readlines()
-    gCodeSettingDict=readSettingsFromGCode2dict(gCodeLines,{"Fallback_nozzle_diameter":0.4,"Fallback_filament_diameter":1.75}) #ADD FALLBACK VALUES HERE
+    gCodeSettingDict=readSettingsFromGCode2dict(gCodeLines)
     parameters=makeFullSettingDict(gCodeSettingDict)
     if not checkforNecesarrySettings(gCodeSettingDict):
-        warnings.warn("Incompatible PursaSlicer-Settings used!")
+        warnings.warn("Incompatible Settings used!")
         input("Can not run script, gcode unmodified. Press enter to close.")
         raise ValueError("Incompatible Settings used!") 
     layerobjs=[]
-    gcodeWasModified=False
     if gCodeFileStream:
         layers=splitGCodeIntoLayers(gCodeLines)
         gCodeFileStream.close()
         print("layers:",len(layers))
-        lastfansetting=0 # initialize variable
         for idl,layerlines in enumerate(layers):
             layer=Layer(layerlines,parameters,idl)
-            layer.addZ()
-            layer.addHeight()
-            lastfansetting=layer.spotFanSetting(lastfansetting)
             layerobjs.append(layer)   
-        for idl,layer in enumerate(layerobjs):
-            modify=False 
+        for idl,layer in enumerate(layerobjs):    
             if idl<1:
                 continue # no overhangs in the first layer and dont mess with the setup
             else:
                 layer.extract_features()
                 layer.spotBridgeInfill()
                 layer.makePolysFromBridgeInfill(extend=parameters.get("ExtendIntoPerimeter",1))
-                layer.polys=layer.mergePolys()
+                layer.mergePolys()
                 layer.verifyinfillpolys()    
-
-                #ARC GENERATION
                 if layer.validpolys:
-                    modify=True
-                    gcodeWasModified=True
-                    print(f"overhang found layer {idl}:",len(layer.polys), f"Z: {layer.z:.2f}")
-                    #set special cooling settings for the follow up layers
-                    maxZ=layer.z+parameters.get("specialCoolingZdist")
-                    idoffset=1
-                    currZ=layer.z
-                    while currZ<=maxZ and idl+idoffset<=len(layerobjs)-1:
-                        currZ=layerobjs[idl+idoffset].z
-                        layerobjs[idl+idoffset].oldpolys.extend(layer.validpolys)
-                        idoffset+=1
-
-                    #make Startpoint form previous layer    
+                    print(f"overhang found layer {idl}:",len(layer.polys))
                     prevLayer=layerobjs[idl-1]
                     prevLayer.makeExternalPerimeter2Polys()
                     arcOverhangGCode=[]  
@@ -165,7 +137,7 @@ def main(gCodeFileStream,path2GCode,skipInput)->None:
                         #find StartPoint and StartLineString
                         startLineString,boundaryWithOutStartLine=prevLayer.makeStartLineString(poly,parameters)
                         if startLineString is None:
-                            warnings.warn("Skipping Polygon because no StartLine Found")
+                            warnings.warn("Skipping Polygon because to StartLine Found")
                             continue
                         startpt=getStartPtOnLS(startLineString,parameters)
                         remainingSpace=poly
@@ -270,7 +242,7 @@ def main(gCodeFileStream,path2GCode,skipInput)->None:
                             plt.show()  
                         #generate gcode for arc and insert at the beginning of the layer
                         eStepsPerMM=calcEStepsPerMM(parameters)
-                        arcOverhangGCode.append(f"M106 S{np.round(parameters.get('bridge_fan_speed',100)*2.55)}\n")#turn cooling Fan on at Bridge Setting
+                        arcOverhangGCode.append(f"M106 S{np.round(parameters.get('bridge_fan_speed',100)*2.55)}")#turn cooling Fan on at Bridge Setting
                         #for arc in arcs4gcode:
                         #    plot_geometry(arc)
                         #    plot_geometry(Point(arc.coords[0]))
@@ -278,112 +250,39 @@ def main(gCodeFileStream,path2GCode,skipInput)->None:
                         #plt.show()
                         for ida,arc in enumerate(arcs4gcode):
                             if not arc.is_empty:    
-                                arcGCode=arc2GCode(arcline=arc,eStepsPerMM=eStepsPerMM,arcidx=ida,kwargs=parameters)
+                                arcGCode=arc2GCode(arcline=arc,eStepsPerMM=eStepsPerMM,arcidx=ida)
                                 arcOverhangGCode.append(arcGCode)
-                                if parameters.get("TimeLapseEveryNArcs")>0:
-                                    if ida%parameters.get("TimeLapseEveryNArcs"):
-                                        arcOverhangGCode.append("M240\n")
-
-                #apply special cooling settings:    
-                if len(layer.oldpolys)>0:
-                    modify=True
-                    print("oldpolys found in layer:",idl)
-                    layer.spotSolidInfill()
-                    layer.makePolysFromSolidInfill(extend=parameters.get("ExtendIntoPerimeter"))
-                    layer.solidPolys=layer.mergePolys(layer.solidPolys)
-                    allhilbertpts=[]
-                    for poly in layer.solidPolys:
-                        hilbertpts=layer.createHilbertCurveInPoly(poly)
-                        allhilbertpts.extend(hilbertpts)
-                        if parameters.get("plotEachHilbert"):
-                            plot_geometry(hilbertpts,changecolor=True)
-                            plot_geometry(layer.solidPolys)
-                            plt.title("Debug")
-                            plt.axis('square')
-                            plt.show()
-                if modify:
+                    #all polys finished       
                     modifiedlayer=Layer([],parameters,idl) # copy the other infos if needed: future to do
                     isInjected=False
-                    hilbertIsInjected=False
-                    curPrintSpeed="G1 F600"
-                    messedWithSpeed=False
-                    messedWithFan=False
-                    layer.prepareDeletion(featurename="Bridge",polys=layer.validpolys)
-                    if len(layer.oldpolys)>0:
-                        layer.prepareDeletion(featurename=":Solid",polys=layer.oldpolys)
+                    layer.prepareDeletion()
                     #print("FEATURES:",[(f[0],f[2]) for f in layer.features])
                     injectionStart=None
-                    print("modifying GCode")
                     for idline,line in enumerate(layer.lines):
-                        if layer.validpolys:
-                            if ";TYPE" in line and not isInjected:#inject arcs at the very start
-                                injectionStart=idline
-                                modifiedlayer.lines.append(";TYPE:Arc infill\n")
-                                modifiedlayer.lines.append(f"M106 S{parameters.get('ArcFanSpeed')}\n")
-                                for overhangline in arcOverhangGCode:
-                                    for arcline in overhangline:
-                                        for cmdline in arcline:
-                                            modifiedlayer.lines.append(cmdline)
-                                isInjected=True
-                                #add restored pre-injected tool position
-                                for id in reversed(range(injectionStart)):
-                                    if "X" in layer.lines[id]:
-                                        modifiedlayer.lines.append(layer.lines[id])
-                                        break
-                        if layer.oldpolys:
-                            if ";TYPE" in line and not hilbertIsInjected:# startpoint of solid infill: print all hilberts from here.
-                                hilbertIsInjected=True
-                                injectionStart=idline
-                                modifiedlayer.lines.append(";TYPE:Solid infill\n")
-                                modifiedlayer.lines.append(f"M106 S{parameters.get('aboveArcsFanSpeed')}\n")
-                                hilbertGCode=hilbert2GCode(allhilbertpts,parameters,layer.height)
-                                modifiedlayer.lines.extend(hilbertGCode)
-                                #add restored pre-injected tool position
-                                for id in reversed(range(injectionStart)):
-                                    if "X" in layer.lines[id]:
-                                        modifiedlayer.lines.append(layer.lines[id])
-                                        break
-                        if "G1 F" in line.split(";")[0]:#special block-speed-command
-                            curPrintSpeed=line    
-                        if layer.exportThisLine(idline):
-                            if layer.isClose2Bridging(line,parameters.get("CoolingSettingDetectionDistance")):
-                                if not messedWithFan:
-                                    modifiedlayer.lines.append(f"M106 S{parameters.get('aboveArcsFanSpeed')}\n")
-                                    messedWithFan=True
-                                modline=line.strip("\n")+ f" F{parameters.get('aboveArcsPerimeterPrintSpeed')}\n"     
-                                modifiedlayer.lines.append(modline)
-                                messedWithSpeed=True
-                            else:
-                                if messedWithFan and not parameters.get("applyAboveFanSpeedToWholeLayer"):
-                                    modifiedlayer.lines.append(f"M106 S{layer.fansetting:.0f}\n")
-                                    messedWithFan=False
-                                if messedWithSpeed:
-                                    modifiedlayer.lines.append(curPrintSpeed+"\n")
-                                    messedWithSpeed=False
-                                modifiedlayer.lines.append(line)
-                    if messedWithFan:
-                        modifiedlayer.lines.append(f"M106 S{layer.fansetting:.0f}\n")
-                        messedWithFan=False        
+                        if ";TYPE" in line and not isInjected:
+                            injectionStart=idline
+                            modifiedlayer.lines.append(";TYPE:Arc infill\n")
+                            for overhangline in arcOverhangGCode:
+                                for arcline in overhangline:
+                                    for cmdline in arcline:
+                                        modifiedlayer.lines.append(cmdline)
+                            isInjected=True
+                            #add restored pre-injected tool position
+                            for id in reversed(range(injectionStart)):
+                                if "X" in layer.lines[id]:
+                                    modifiedlayer.lines.append(layer.lines[id])
+                                    break
+                        if layer.exportThisLine(idline):        
+                            modifiedlayer.lines.append(line)
                     layerobjs[idl]=modifiedlayer  # overwrite the infos
-    if gcodeWasModified:
-        overwrite=True
-        if parameters.get("Path2Output"):
-            path2GCode=parameters.get("Path2Output")
-            overwrite=False
-        f=open(path2GCode,"w")
-        if overwrite:
-            print("overwriting file")
-        else: 
-            print("write to",path2GCode)    
-        for layer in layerobjs:
-            f.writelines(layer.lines)
-        f.close()   
-    else:
-        print(f"Analysed {len(layerobjs)} Layers, but no matching overhangs found->no arcs generated. If unexpected: look if restricting settings like 'minArea' or 'MinBridgeLength' are correct.")     
+    f=open(path2GCode,"w")
+    print("write to file")
+    for layer in layerobjs:
+        f.writelines(layer.lines)
+    f.close()    
     #os.startfile(path2GCode, 'open')
-    print("Script execution complete.")
-    if not skipInput:
-        input("Press enter to exit.")
+    print("Code executed successful")
+    input("Push enter to close this window")
 
 ################################# HELPER FUNCTIONS GCode->Polygon #################################
 ###################################################################################################
@@ -400,6 +299,7 @@ def getFileStreamAndPath(read=True):
             f=open(filepath, "w")    
         return f,filepath
     except IOError:
+        print("File not found")
         input("File not found.Press enter.")
         sys.exit(1)
         
@@ -417,7 +317,7 @@ def splitGCodeIntoLayers(gcode:list)->list:
     print("last read linenumber:",linenumber)            
     return gcode_list
             
-def getPtfromCmd(line:str)->Point:
+def getPtfromCmd(line:str)->Point | None:
     x=None
     y=None
     line=line.split(";")[0]
@@ -466,9 +366,7 @@ class Layer():
         self.deleteTheseInfills=[]
         self.deletelines=[]
         self.associatedIDs=[]
-        self.sinfills=[]
         self.parameters=kwargs
-        self.lastP=None
     def extract_features(self)->None:
         buff=[]
         currenttype=""
@@ -483,26 +381,7 @@ class Layer():
             else:
                 buff.append(line)  
         self.features.append([currenttype,buff,start])# fetch last one
-    def addZ(self,z:float=None)->None:
-        if z:
-            self.z=z
-        else:
-            for l in self.lines:
-                cmd=l.split(";")[0] # work only on the command itself
-                if "G1" in cmd and "Z" in cmd:
-                    cmds=cmd.split(" ")
-                    for c in cmds:        
-                        if "Z" in c:
-                            self.z=float(c[1:])
-                            return
-    def addHeight(self):
-        for l in self.lines:
-            if ";HEIGHT" in l:
-                h=l.split(":")
-                self.height=float(h[-1])
-                return
-        warnings.warn(f"Layer {self.layernumber}: no height found, using layerheight default!")
-        self.height=self.parameters.get("layer_height")         
+
     def getRealFeatureStartPoint(self,idf:int)->Point:
         """ since GCode only stores destination of the move, the origin of the first move has to be included.""" 
         if idf<1:
@@ -534,7 +413,7 @@ class Layer():
                 if poly:
                     self.extPerimeterPolys.append(poly) 
                 extPerimeterIsStarted=False   
-    def makeStartLineString(self,poly:Polygon,kwargs:dict={}):
+    def makeStartLineString(self,poly:Polygon,kwargs:dict={})->tuple[LineString,LineString] | tuple[None,None]:
         if not self.extPerimeterPolys:
             self.makeExternalPerimeter2Polys()
         if len(self.extPerimeterPolys)<1:
@@ -582,16 +461,13 @@ class Layer():
         warnings.warn(f"Layer {self.layernumber}: No intersection with prevLayer External Perimeter detected") 
         return None,None
 
-    def mergePolys(self,thesepolys:list=None)-> list:
-        if not thesepolys:
-            thesepolys=self.polys
-        mergedPolys = unary_union(thesepolys)
+    def mergePolys(self):
+        mergedPolys = unary_union(self.polys)
         #print("Merged Geometry Type:",mergedPolys.geom_type)
         if mergedPolys.geom_type=="Polygon":
-            thesepolys=[mergedPolys]
+            self.polys=[mergedPolys]
         elif mergedPolys.geom_type=="MultiPolygon" or mergedPolys.geom_type=="GeometryCollection":
-            thesepolys=[poly for poly in mergedPolys.geoms] 
-        return thesepolys
+            self.polys=[poly for poly in mergedPolys.geoms] 
     def spotFeaturePoints(self,featureName:str,splitAtWipe=False,includeRealStartPt=False, splitAtTravel=False)->list:
         parts=[]
         for idf,fe in enumerate(self.features):
@@ -626,31 +502,8 @@ class Layer():
                 if len(pts)>1:#fetch last one
                     parts.append(pts)           
         return parts                     
-    def spotSolidInfill(self)->None:
-        parts=self.spotFeaturePoints("Solid infill",splitAtTravel=True)
-        for infillpts in parts:
-            if self.verifySolidInfillPts(infillpts):
-                self.sinfills.append(LineString(infillpts))
-    def makePolysFromSolidInfill(self,extend:float=1)->None:
-        self.solidPolys=[]
-        for sInfill in self.sinfills:
-            infillPoly=sInfill.buffer(extend)
-            self.solidPolys.append(infillPoly)
-            if self.parameters.get("plotDetectedSolidInfillPoly"):
-                plot_geometry(infillPoly)
-                plot_geometry(sInfill,"g")
-                plt.axis('square')
-                plt.show()
-    def verifySolidInfillPts(self,infillpts:list)->bool:
-        '''Verify SollidInfillPts by checking if >=1 of the Points is inside the desired polygon-locations.'''
-        for p in infillpts:
-                for poly in self.oldpolys:
-                    if poly.contains(p):
-                        return True          
-        return False   
-
     def spotBridgeInfill(self)->None:
-        parts=self.spotFeaturePoints("Bridge infill",splitAtTravel=True)
+        parts=self.spotFeaturePoints("Bridge",splitAtTravel=True)
         for idf,infillpts in enumerate(parts):
             self.binfills.append(BridgeInfill(infillpts))
     def makePolysFromBridgeInfill(self,extend:float=1)->None:
@@ -666,30 +519,25 @@ class Layer():
                 plt.axis('square')
                 plt.show()
     def getOverhangPerimeterLineStrings(self):
-        parts=self.spotFeaturePoints("Overhang perimeter",includeRealStartPt=True)
+        parts=self.spotFeaturePoints("Overhang wall",includeRealStartPt=True)
         if parts:
             return [LineString(pts) for pts in parts]
         else:
             return []    
-    def verifyinfillpolys(self,minDistForValidation:float=0.5)->None:
+    def verifyinfillpolys(self,minDistForValidation=0.5)->None:
         '''Verify a poly by measuring the distance to any overhang parameters. Valid if measuredDist<minDistForValidation'''
         overhangs=self.getOverhangPerimeterLineStrings()
         if len(overhangs)>0:
-            if self.parameters.get("PrintDebugVerification"):print(f"Layer {self.layernumber}: {len(overhangs)} Overhangs found")
             allowedSpacePolygon=self.parameters.get("AllowedSpaceForArcs")
             if not allowedSpacePolygon:
                 input(f"Layer {self.layernumber}: no allowed space Polygon provided to layer obj, unable to run script. Press Enter.")
                 raise ValueError(f"Layer {self.layernumber}: no allowed space Polygon provided to layer obj")
-            if self.parameters.get("PrintDebugVerification"):print("No of Polys:",len(self.polys))    
             for idp,poly in enumerate(self.polys):
                 if not poly.is_valid:
-                    if self.parameters.get("PrintDebugVerification"):print(f"Layer {self.layernumber}: Poly{idp} is (shapely-)invalid")
                     continue
-                if (not allowedSpacePolygon.contains(poly)) and self.parameters.get("CheckForAllowedSpace"):
-                    if self.parameters.get("PrintDebugVerification"):print(f"Layer {self.layernumber}: Poly{idp} is not in allowedSpacePolygon")
+                if not allowedSpacePolygon.contains(poly):
                     continue
                 if poly.area<self.parameters.get("MinArea"):
-                    if self.parameters.get("PrintDebugVerification"):print(f"Layer {self.layernumber}: Poly{idp} has to little area: {poly.area:.2f}")
                     continue               
                 for ohp in overhangs:
                     if poly.distance(ohp)<minDistForValidation:
@@ -697,19 +545,16 @@ class Layer():
                             self.validpolys.append(poly)
                             self.deleteTheseInfills.append(idp)
                             break
-                if self.parameters.get("PrintDebugVerification"):print(f"Layer {self.layernumber}: Poly{idp} is not close enough to overhang perimeters")        
 
     
-    def prepareDeletion(self,featurename:str="Bridge",polys:list=None)->None:
-        if not polys:
-            polys=self.validpolys
+    def prepareDeletion(self)->None:
         for idf,fe in enumerate(self.features):
             ftype=fe[0]
             lines=fe[1]
             start=fe[2]
             deleteThis=False
-            if featurename in ftype:
-                for poly in polys:
+            if "Bridge" in ftype:
+                for poly in self.validpolys:
                     for line in lines:
                         p=getPtfromCmd(line)
                         if p:
@@ -720,7 +565,7 @@ class Layer():
                             break 
                 if deleteThis:           
                     if idf<len(self.features)-1:
-                        end=self.features[idf+1][2]-1 # TODO: prevent deletion of last travel move.
+                        end=self.features[idf+1][2]
                     else:
                         end=len(self.lines) 
                     self.deletelines.append([start,end])
@@ -732,73 +577,7 @@ class Layer():
                     export=False
         return export            
 
-    def createHilbertCurveInPoly(self,poly:Polygon):
-        print("making hilbert surface")
-        dimensions=2
-        w=self.parameters.get("solid_infill_extrusion_width")
-        a=self.parameters.get("HilbertFillingPercentage")/100
-        mmBetweenTravels=(self.parameters.get("aboveArcsInfillPrintSpeed")/60)*self.parameters.get("HilbertTravelEveryNSeconds")
-        minX, minY, maxX, maxY=poly.bounds
-        lx=maxX-minX
-        ly=maxY-minY
-        l=max(lx,ly)
-        #Iterationcount Math explained: 
-        # startpoint: l/w=number of needed segments. segments=(2**iterationcount)-1. Solved for iterationcount.
-        iterationCount=int(np.ceil(np.log((a*l+w)/w)/np.log(2))) # + applied ceiling function to ensucre full coverage.
-        scale=w/a#l/(2**iterationCount-1)/a
-        maxidx=int(2**(dimensions* iterationCount) - 1)
-        locs = decode(np.arange(maxidx), 2, iterationCount)# hilbertidx->(x,y) first argument: idx, second: dimensions, third: bits per dim
-        #move the curve 1 point in the smaller direction every second layer=>web the curves in z together by overlapping.
-        movX=self.layernumber%2*w/a
-        movY=self.layernumber%2*w/a
-        x=locs[:,0]*scale+minX-movX
-        y=locs[:,1]*scale+minY-movY
-        hilbertPointsRaw=[[xi,yi] for xi,yi in zip(x.tolist(),y.tolist())]
-        noEl=int(np.ceil(mmBetweenTravels/scale))
-        buff=[]
-        compositeList=[]
-        #divide in subset of n elements and shuffle them to prevent localized overheating.
-        for el in hilbertPointsRaw:
-            p=Point(el)
-            if p.within(poly):
-                buff.append(p)
-            else:
-                if len(buff)>5:#neglegt very small pieces
-                    if len(buff)>noEl*1.7:
-                        compositeList.extend([buff[x:x+noEl] for x in range(0, len(buff),noEl)])
-                    else:    
-                        compositeList.append(buff)
-                buff=[]#delete single pts if there.
-        if len(buff)>5:
-            compositeList.append(buff) #catch last one
-        random.shuffle(compositeList)
-        return compositeList
-    def isClose2Bridging(self,line:str,minDetectionDistance:float=3):
-        if not "G1" in line:
-            return False
-        p=getPtfromCmd(line)
-        if not p:
-            return False
-        if not self.lastP:
-            self.lastP=Point(p.x-0.01,p.y-0.01)    
-        ls=LineString([p,self.lastP])
-        self.lastP=p
-        for poly in self.oldpolys:
-            if ls.distance(poly)<minDetectionDistance:
-                return True
-        return False        
-    def spotFanSetting(self,lastfansetting:float):
-        for line in self.lines:
-            if "M106" in line.split(";")[0]:
-                svalue=line.strip("\n").split(";")[0].split(" ")[1]
-                self.fansetting=float(svalue[1:])
-                return self.fansetting
-        self.fansetting=lastfansetting
-        return lastfansetting        
-
-
-
-            
+                            
 class Arc():
     def __init__(self,center:Point,r:float,kwargs:dict={}) -> None:
         self.center=center
@@ -807,7 +586,7 @@ class Arc():
         self.parameters=kwargs
     def setPoly(self,poly:Polygon)->None:
         self.poly=poly    
-    def extractArcBoundary(self):
+    def extractArcBoundary(self)->LineString|list:
         circ=create_circle(self.center,self.r,self.pointsPerCircle)    
         trueArc=self.poly.boundary.intersection(circ.boundary.buffer(1e-2))
         if trueArc.geom_type=='MultiLineString':
@@ -831,7 +610,7 @@ class Arc():
         else:
             input("ArcBoundary merging Error.Unable to run script. Press Enter.")
             raise ValueError("ArcBoundary merging Error")
-    def generateConcentricArc(self,startpt:Point,remainingSpace:Polygon)->Polygon:
+    def generateConcentricArc(self,startpt:Point,remainingSpace:Polygon|MultiPolygon)->Polygon:
         circ=create_circle(startpt,self.r,self.pointsPerCircle)
         arc=circ.intersection(remainingSpace)
         self.poly=arc
@@ -968,7 +747,7 @@ def move_toward_point(start_point:Point, target_point:Point, distance:float)->Po
     # Move the point in the direction of the target by the set distance
     return Point(start_point.x + dx*distance, start_point.y + dy*distance)        
 
-def redistribute_vertices(geom:LineString, distance:float)->LineString:
+def redistribute_vertices(geom:LineString|MultiLineString, distance:float)->LineString|MultiLineString:
     if geom.geom_type == 'LineString':
         num_vert = int(round(geom.length / distance))
         if num_vert == 0:
@@ -983,7 +762,7 @@ def redistribute_vertices(geom:LineString, distance:float)->LineString:
         warnings.warn('unhandled geometry %s', (geom.geom_type,))
         return geom
     
-def generateMultipleConcentricArcs(startpt:Point,rMin:float,rMax:float, boundaryLineString:LineString,remainingSpace:Polygon,kwargs={})->list:
+def generateMultipleConcentricArcs(startpt:Point,rMin:float,rMax:float, boundaryLineString:LineString,remainingSpace:Polygon|MultiPolygon,kwargs={})->list:
     arcs=[]
     r=rMin
     while r<=rMax:
@@ -1053,11 +832,11 @@ def getArcBoundarys(concentricArcs:list)->list:
             boundarys.append(arcLine)
     return boundarys                
 
-def readSettingsFromGCode2dict(gcodeLines:list,fallbackValuesDict:dict)->dict:
-    gCodeSettingDict=fallbackValuesDict
+def readSettingsFromGCode2dict(gcodeLines:list)->dict:
+    gCodeSettingDict={}
     isSetting=False
     for line in gcodeLines:
-        if "; prusaslicer_config = begin" in line:
+        if "; EXECUTABLE_BLOCK_END" in line:
             isSetting=True
             continue
         if isSetting :
@@ -1067,52 +846,28 @@ def readSettingsFromGCode2dict(gcodeLines:list,fallbackValuesDict:dict)->dict:
                     gCodeSettingDict[setting[0].strip(" ")]=literal_eval(setting[1]) # automaticly convert into int,float,...
                 except:
                     gCodeSettingDict[setting[0].strip(" ")]=setting[1] # leave the complex settings as strings. They shall be handled individually if necessary 
-            elif len(setting)>2:
-                gCodeSettingDict[setting[0].strip(" ")]=setting[1:]
-                warnings.warn(f"PrusaSlicer Setting {setting[0]} not in the expected key/value format, but added into the settings-dictionarry")
-            else:    
-                print("Could not read setting from PrusaSlicer:",setting)
-    if "%" in str(gCodeSettingDict.get("perimeter_extrusion_width")) : #overwrite Percentage width as suggested by 5axes via github                
-        gCodeSettingDict["perimeter_extrusion_width"]=gCodeSettingDict.get("nozzle_diameter")*(float(gCodeSettingDict.get("perimeter_extrusion_width").strip("%"))/100)
-    isWarned=False    
-    for key,val in gCodeSettingDict.items():
-        if isinstance(val,tuple) :
-            if gCodeSettingDict.get("Fallback_"+key):
-                gCodeSettingDict[key]=gCodeSettingDict.get("Fallback_"+key)
-                #warnings.warn(f"{key}: Fallback value used: {gCodeSettingDict.get(key)}")
             else:
-                gCodeSettingDict[key]=val[0]    
-                if not isWarned:
-                    warnings.warn(f"{key} was specified as tuple/list, this is normal for using multiple extruders. For all list values First values will be used. If unhappy: Add manual fallback value by searching for ADD FALLBACK in the code. And add 'Fallback_<key>:<yourValue>' into the dictionary.")
-                    isWarned=True
+                print("unmatching setting:",setting)          
     return gCodeSettingDict
-
 def checkforNecesarrySettings(gCodeSettingDict:dict)->bool:
+    if not ";AFTER_LAYER_CHANGE" in gCodeSettingDict.get("layer_change_gcode"):
+        warnings.warn("After Layer Change missing keyword, expected: ';AFTER_LAYER_CHANGE' ")
+        return False
     if not gCodeSettingDict.get("use_relative_e_distances"):
-        warnings.warn("Script only works with relative e-distances enabled in PrusaSlicer. Change acordingly.")
+        warnings.warn("Script only works with relative e-distances. Change acordingly.")
         return False
-    if gCodeSettingDict.get("extrusion_width")<0.001 or gCodeSettingDict.get("perimeter_extrusion_width")<0.001 or gCodeSettingDict.get("solid_infill_extrusion_width")<0.001:
-        warnings.warn("Script only works with extrusion_width and perimeter_extrusion_width and solid_infill_extrusion_width>0. Change in PrusaSlicer acordingly.")
+    if not gCodeSettingDict.get("detect_overhang_wall"):
+        warnings.warn("Overhang detection disabled. Activate for script success!")
         return False    
-    if not gCodeSettingDict.get("overhangs"):
-        warnings.warn("Overhang detection disabled in PrusaSlicer. Activate in PrusaSlicer for script success!")
-        return False
-    if gCodeSettingDict.get("bridge_speed")>5:
-        warnings.warn(f"Your Bridging Speed is set to {gCodeSettingDict.get('bridge_speed'):.0f} mm/s in PrusaSlicer. This can cause problems with warping.<=5mm/s is recommended")        
     if gCodeSettingDict.get("infill_first"):
-        warnings.warn("Infill set in PrusaSlicer to be printed before perimeter. This can cause problems with the script.")
+        warnings.warn("Infill is printed before perimeter. This can cause problems with the script.")
     if gCodeSettingDict.get("external_perimeters_first"):
-        warnings.warn("PrusaSlicer-Setting: External perimeter is printed before inner perimeters. Change for better overhang performance. ")
+        warnings.warn("External perimeter is printed before inner perimeters. Change for better overhang performance. ")
     if not gCodeSettingDict.get("avoid_crossing_perimeters"):
-        warnings.warn("PrusaSlicer-Setting: Travel Moves may cross the outline and therefore cause artefacts in arc generation.")    
+        warnings.warn("Travel Moves may cross the outline and therefore cause artefacts in arc generation.")    
     return True
-def calcEStepsPerMM(settingsdict:dict,layerheight:float=None)->float:
-    if layerheight:# case: printing on surface.
-        w=settingsdict.get("infill_extrusion_width")
-        h=layerheight
-        eVol=(w-h)*h+np.pi*(h/2)**2 *settingsdict.get("HilbertInfillExtrusionMultiplier",1)
-    else:   #case: bridging, used for arcs. 
-        eVol = (settingsdict.get("nozzle_diameter")/2)**2 * np.pi *settingsdict.get("ArcExtrusionMultiplier",1)#printing in midair will result in circular shape. Scource: https://manual.slic3r.org/advanced/flow-math
+def calcEStepsPerMM(settingsdict:dict)->float:
+    eVol = (settingsdict.get("nozzle_diameter")/2)**2 * np.pi *settingsdict.get("ArcExtrusionMultiplier",1)#printing in midair will result in circular shape. Scource: https://manual.slic3r.org/advanced/flow-math
     if settingsdict.get("use_volumetric_e"):
         return eVol
     else:
@@ -1120,17 +875,17 @@ def calcEStepsPerMM(settingsdict:dict,layerheight:float=None)->float:
         return eInMm
 
 def p2GCode(p:Point,E=0,**kwargs)->str:
-    line=f"G1 X{p.x:.6} Y{p.y:.6} "
-    line+="E0" if E==0 else f"E{E:.7f}"
+    line=f"G1 X{p.x:.4} Y{p.y:.4} "
+    line+="E0" if E==0 else f"E{E:.5f}"
     if kwargs.get('F'):
         line+=f" F{kwargs.get('F'):0d}"
     line+='\n'       
     return line  
 
-def retractGCode(retract:bool=True,kwargs:dict={})->str:
+def retractGCode(retract=True,kwargs={})->str:
     retractDist=kwargs.get("retract_length",1)
     E= -retractDist if retract else retractDist
-    return f"G1 E{E} F{kwargs.get('retract_speed',35)*60}\n"  
+    return f"G1 E{E} F{kwargs.get('retract_speed',2100)}\n"  
 
 def setFeedRateGCode(F:int)->str:
     return f"G1 F{F}\n"     
@@ -1153,7 +908,7 @@ def arc2GCode(arcline:LineString,eStepsPerMM:float,arcidx=None,kwargs={})->list:
             p1=p
             GCodeLines.append(f";Arc {arcidx if arcidx else ' '} Length:{arcline.length}\n")
             GCodeLines.append(p2GCode(p,F=kwargs.get('ArcTravelFeedRate',100*60)))#feedrate is mm/min...
-            GCodeLines.append(retractGCode(retract=False,kwargs=kwargs))
+            GCodeLines.append(retractGCode(retract=False))
             GCodeLines.append(setFeedRateGCode(arcPrintSpeed))
         else:
             dist=p.distance(p1)
@@ -1162,26 +917,8 @@ def arc2GCode(arcline:LineString,eStepsPerMM:float,arcidx=None,kwargs={})->list:
                 p1=p
         if idp==len(pts)-1:
             GCodeLines.append(p2GCode(pExtend,E=extDist*eStepsPerMM))#extend arc tangentially for better bonding between arcs
-            GCodeLines.append(retractGCode(retract=True,kwargs=kwargs))
+            GCodeLines.append(retractGCode(retract=True))
     return GCodeLines        
-
-def hilbert2GCode(allhilbertpts:list,parameters:dict,layerheight:float):
-    hilbertGCode=[]
-    eStepsPerMM=calcEStepsPerMM(parameters,layerheight)
-    for idc,curvepts in enumerate(allhilbertpts):
-        for idp,p in enumerate(curvepts):
-            if idp==0:
-                hilbertGCode.append(p2GCode(p,F=parameters.get("ArcTravelFeedRate")))
-                if idc==0:
-                    hilbertGCode.append(retractGCode(False,parameters))
-            elif idp==1:
-                hilbertGCode.append(p2GCode(p,E=eStepsPerMM*p.distance(lastP), F=parameters.get("aboveArcsInfillPrintSpeed")))
-            else:    
-                hilbertGCode.append(p2GCode(p,E=eStepsPerMM*p.distance(lastP)))
-            lastP=p 
-        #finish line       
-    hilbertGCode.append(retractGCode(True,parameters))    
-    return hilbertGCode 
 
 def _warning(message,category = UserWarning, filename = '', lineno = -1,*args, **kwargs):
     print(f"{filename}:{lineno}: {message}")
@@ -1189,9 +926,7 @@ warnings.showwarning = _warning
 
 ################################# MAIN EXECUTION #################################
 ##################################################################################
+
 if __name__=="__main__":
     gCodeFileStream,path2GCode = getFileStreamAndPath()
-    skipInput=False
-    if platform.system()!="Windows":
-        skipInput=True
-    main(gCodeFileStream,path2GCode, skipInput)
+    main(gCodeFileStream,path2GCode)
