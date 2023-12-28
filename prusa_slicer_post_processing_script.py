@@ -617,7 +617,7 @@ class Arc():
         return arc            
 
 class BridgeInfill():
-    def __init__(self,pts=[],id=random.randint(1,1e10)) -> None:
+    def __init__(self,pts=[],id=random.randint(1,int(1e10))) -> None:
         self.pts=pts
         self.deleteLater=False
         self.id=id
