@@ -1,40 +1,3 @@
-"""
-This script generates Overhangs by stringing together Arcs, allowing successful fdm-3d-printing of large 90 deg overhangs!
-The genius Idea is emerged from Steven McCulloch, who coded a demonstration and the basic mechanics: https://github.com/stmcculloch/arc-overhang
-This python script builds up on that and offers a convinient way to integrate the ArcOverhangs into an existing gcode-file.
-
-HOW TO USE: 
-Option A) open your system console and type 'python ' followed by the path to this script and the path of the gcode file. Will overwrite the file.
-Option B) open PrusaSlicer, go to print-settings-tab->output-options. Locate the window for post-processing-script. 
-    In that window enter: full path to your python exe,emtyspace, full path to this script.
-    If the python path contains any empty spaces, mask them as described here: https://manual.slic3r.org/advanced/post-processing
-=>PrusaSlicer will execute the script after the export of the Gcode, therefore the view in the window wont change. Open the finished gcode file to see the results.
-
-If you want to change generation settings: Scroll to 'Parameter' section. Settings from PrusaSlicer will be extracted automaticly from the gcode.
-
-Requirements:
-Python 3.5+ and the librarys: shapely 1.8+, numpy 1.2+, matplotlib for debugging
-
-Limitations:
--As with your 3d-printer you may need to customize some settings to your specific geometry. The script will inform you how, when Errors occur :)
--Currently deletes all BridgeInfills in layers with arcs...
--while the arcs print fairly straight, the layers above will induce warping.
--The Arcs are extruded very thick, so the layer will be 0.1-0.5mm thicker (dependend on nozzle dia) than expected=>if precision needed make test prints to counter this effect.
-
-Notes:
-This code is a little messy. Usually I would devide it into multiple files, but that would compromise the ease of use.
-Therefore I divided the code into sections, marked with ###
-Feel free to give it some refactoring and add more functionalities!
-
-Future possible extensions:
--slow down all commands 5mm above arcs, to prevent warping, slow down the bridging-speed of the perimeter, if necessary
-
-
-Known issues:
--pointsPerCircle>80 give weird results
--MaxDistanceFromPerimeter >=2*perimeterwidth=weird result.
--avoid using the code multiple times onto the same gcode, as errors might accumulate.
-"""
 #!/usr/bin/python
 import sys
 import os
@@ -65,16 +28,16 @@ def makeFullSettingDict(gCodeSettingDict:dict) -> dict:
         "RMax":100, # the max radius of the arcs.
 
         #advanced Settings, you should not need to touch these.
-        "ArcExtrusionMultiplier":1.35,
+        "ArcExtrusionMultiplier":1.2,
         "ArcSlowDownBelowThisDuration":3,# Arc Time below this Duration =>slow down, Unit: sec
         #"ArcWidth":gCodeSettingDict.get("nozzle_diameter")*0.95, #change the spacing between the arcs,should be nozzle_diameter
-        "ArcWidth":0.4*0.95, #change the spacing between the arcs,should be nozzle_diameter
+        "ArcWidth":0.4*0.96, #change the spacing between the arcs,should be nozzle_diameter
         "CornerImportanceMultiplier":0.2, # Startpoint for Arc generation is chosen close to the middle of the StartLineString and at a corner. Higher=>Cornerselection more important.
         "DistanceBetweenPointsOnStartLine":0.1,#used for redestribution, if start fails.
         "GCodeArcPtMinDist":0.1, # min Distance between points on the Arcs to for seperate GCode Command. Unit:mm
         "ExtendArcDist":1.0, # extend Arcs tangentially for better bonding bewteen them, only end-piece affected(yet), Unit:mm
         "MinStartArcs":2, # how many arcs shall be generated in first step
-        "PointsPerCircle":80, # each Arc starts as a discretized circle. Higher will slow down the code but give more accurate results for the arc-endings. 
+        "PointsPerCircle":60, # each Arc starts as a discretized circle. Higher will slow down the code but give more accurate results for the arc-endings. 
         "SafetyBreak_MaxArcNumber":2000, #max Number of Arc Start Points. prevents While loop form running for ever.
         "WarnBelowThisFillingPercentage":90, # fill the overhang at least XX%, else send a warning. Easier detection of errors in small/delicate areas. Unit:Percent
         "UseLeastAmountOfCenterPoints":False, # always generates arcs until rMax is reached, divide the arcs into pieces in needed. reduces the amount of centerpoints.
@@ -617,7 +580,7 @@ class Arc():
         return arc            
 
 class BridgeInfill():
-    def __init__(self,pts=[],id=random.randint(1,1e10)) -> None:
+    def __init__(self,pts=[],id=random.randint(1,int(1e10))) -> None:
         self.pts=pts
         self.deleteLater=False
         self.id=id
