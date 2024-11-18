@@ -27,6 +27,10 @@ Known issues:
 import sys
 import os
 import logging
+try:
+    from distutils.version import LooseVersion
+except ModuleNotFoundError:
+    logging.warning("distutils module not found. Some functionalities may be limited.")
 from shapely import Point, Polygon, LineString, GeometryCollection, MultiLineString, MultiPolygon
 from shapely.ops import nearest_points, linemerge, unary_union
 import matplotlib.pyplot as plt
